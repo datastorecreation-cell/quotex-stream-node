@@ -6,7 +6,7 @@ import websockets
 
 app = FastAPI()
 
-# Candle buffer for the 3 OTC pairs
+# Candle store buffer
 CANDLE_STORE = {
     "EUR/USD OTC": [],
     "GBP/USD OTC": [],
@@ -23,30 +23,30 @@ SYMBOL_MAP = {
 QUOTEX_WS = "wss://ws2.quotex.com/socket.io/?EIO=3&transport=websocket"
 
 async def quotex_listener():
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Origin": "https://qxbroker.com"
-    }
+    headers = [
+        ("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+        ("Origin", "https://qxbroker.com")
+    ]
 
     while True:
         try:
-            async with websockets.connect(QUOTEX_WS, extra_headers=headers, ping_interval=None) as ws:
-                # 1. Complete initial engine.io handshake
+            # Using additional_headers for modern websockets/Python versions
+            async with websockets.connect(QUOTEX_WS, additional_headers=headers, ping_interval=None) as ws:
+                # 1. Complete handshake
                 await ws.send("2probe")
                 init_resp = await ws.recv()
                 if "3probe" in init_resp:
                     await ws.send("5")
 
-                # 2. Subscribe to each OTC asset stream (timeframe 60 = 1 minute)
+                # 2. Subscribe to OTC asset streams
                 for sym in SYMBOL_MAP.keys():
                     sub_msg = f'42["sub_chart", {{"symbol": "{sym}", "timeframe": 60}}]'
                     await ws.send(sub_msg)
 
-                # 3. Process live stream
+                # 3. Stream incoming messages
                 while True:
                     msg = await ws.recv()
                     
-                    # Heartbeat ping from server
                     if msg == "2":
                         await ws.send("3")
                         continue
@@ -57,7 +57,6 @@ async def quotex_listener():
                             event_name = payload[0]
                             data = payload[1]
 
-                            # Historical or streaming candle batches
                             if event_name in ["chart_data", "candles"]:
                                 sym = data.get("symbol")
                                 pair_name = SYMBOL_MAP.get(sym)
