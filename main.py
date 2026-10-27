@@ -6,84 +6,83 @@ import websockets
 
 app = FastAPI()
 
-# Buffer storing the last 50 candles per asset
+# Candle buffer for the 3 OTC pairs
 CANDLE_STORE = {
     "EUR/USD OTC": [],
     "GBP/USD OTC": [],
     "USD/JPY OTC": []
 }
 
-# Mapping our display names to Quotex OTC internal identifiers
+# Pair lookup mapping
 SYMBOL_MAP = {
     "EURUSD_otc": "EUR/USD OTC",
     "GBPUSD_otc": "GBP/USD OTC",
     "USDJPY_otc": "USD/JPY OTC"
 }
 
-QUOTEX_WS_URL = "wss://ws2.quotex.com/socket.io/?EIO=3&transport=websocket"
+QUOTEX_WS = "wss://ws2.quotex.com/socket.io/?EIO=3&transport=websocket"
 
-async def quotex_feed_listener():
-    """Persistent background task maintaining the Quotex WebSocket connection."""
+async def quotex_listener():
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Origin": "https://qxbroker.com"
     }
 
     while True:
         try:
-            async with websockets.connect(QUOTEX_WS_URL, extra_headers=headers, ping_interval=20, ping_timeout=20) as ws:
-                # 1. Complete socket.io handshake
-                await ws.send('2probe')
-                response = await ws.recv()
-                if '3probe' in response:
-                    await ws.send('5')
+            async with websockets.connect(QUOTEX_WS, extra_headers=headers, ping_interval=None) as ws:
+                # 1. Complete initial engine.io handshake
+                await ws.send("2probe")
+                init_resp = await ws.recv()
+                if "3probe" in init_resp:
+                    await ws.send("5")
 
-                # 2. Subscribe to each OTC asset stream
-                for qx_symbol in SYMBOL_MAP.keys():
-                    sub_payload = f'42["sub_chart", {{"symbol": "{qx_symbol}", "timeframe": 60}}]'
-                    await ws.send(sub_payload)
+                # 2. Subscribe to each OTC asset stream (timeframe 60 = 1 minute)
+                for sym in SYMBOL_MAP.keys():
+                    sub_msg = f'42["sub_chart", {{"symbol": "{sym}", "timeframe": 60}}]'
+                    await ws.send(sub_msg)
 
-                # 3. Stream and parse live incoming messages
+                # 3. Process live stream
                 while True:
                     msg = await ws.recv()
+                    
+                    # Heartbeat ping from server
+                    if msg == "2":
+                        await ws.send("3")
+                        continue
+                    
                     if msg.startswith("42"):
-                        raw_json = msg[2:]
-                        data = json.loads(raw_json)
-                        
-                        # Handle live candle updates from Quotex
-                        if isinstance(data, list) and len(data) >= 2:
-                            event_type, payload = data[0], data[1]
-                            
-                            if event_type == "chart_data":
-                                symbol = payload.get("symbol")
-                                pair_name = SYMBOL_MAP.get(symbol)
-                                candles = payload.get("candles", [])
+                        payload = json.loads(msg[2:])
+                        if isinstance(payload, list) and len(payload) >= 2:
+                            event_name = payload[0]
+                            data = payload[1]
+
+                            # Historical or streaming candle batches
+                            if event_name in ["chart_data", "candles"]:
+                                sym = data.get("symbol")
+                                pair_name = SYMBOL_MAP.get(sym)
+                                raw_candles = data.get("candles") or data.get("data") or []
                                 
-                                if pair_name and candles:
+                                if pair_name and raw_candles:
                                     formatted = []
-                                    for c in candles[-50:]:
+                                    for c in raw_candles[-50:]:
                                         formatted.append({
                                             "time": c.get("time", int(time.time())),
                                             "open": float(c.get("open")),
                                             "high": float(c.get("high")),
                                             "low": float(c.get("low")),
                                             "close": float(c.get("close")),
-                                            "payout": int(payload.get("payout", 85))
+                                            "payout": int(data.get("payout", 88))
                                         })
                                     CANDLE_STORE[pair_name] = formatted
 
-                    elif msg == "2":
-                        # Engine.io heartbeat keep-alive
-                        await ws.send("3")
-
         except Exception as e:
-            print(f"Quotex stream disconnected: {e}. Reconnecting in 5s...")
-            await asyncio.sleep(5)
+            print(f"Connection dropped: {e}. Reconnecting in 3 seconds...")
+            await asyncio.sleep(3)
 
 @app.on_event("startup")
-async def startup_event():
-    # Spin off persistent stream in the background on Render startup
-    asyncio.create_task(quotex_feed_listener())
+async def startup():
+    asyncio.create_task(quotex_listener())
 
 @app.get("/candles")
 def get_candles():
