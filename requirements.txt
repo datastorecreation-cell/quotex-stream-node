@@ -1,4 +1,4 @@
 fastapi
 uvicorn
 quotexpy
-curl_cffi
+playwright
