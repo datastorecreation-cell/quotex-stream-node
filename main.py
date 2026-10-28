@@ -1,75 +1,60 @@
-import asyncio
 import os
-import time
 from fastapi import FastAPI
-from quotexpy import Quotex
+import httpx
 
 app = FastAPI()
 
-CANDLE_STORE = {
-    "EUR/USD OTC": [],
-    "GBP/USD OTC": [],
-    "USD/JPY OTC": []
-}
+OTCHARTS_API_KEY = os.getenv("OTCHARTS_API_KEY", "")
 
-PAIRS = {
+# Pairs mapping: OTCharts symbol -> Supabase strategy name
+SYMBOL_MAP = {
     "EURUSD_otc": "EUR/USD OTC",
     "GBPUSD_otc": "GBP/USD OTC",
     "USDJPY_otc": "USD/JPY OTC"
 }
 
-QUOTEX_EMAIL = os.getenv("QUOTEX_EMAIL", "")
-QUOTEX_PASSWORD = os.getenv("QUOTEX_PASSWORD", "")
-
-async def stream_quotex_otc():
-    client = Quotex(
-        email=QUOTEX_EMAIL,
-        password=QUOTEX_PASSWORD,
-        lang="en"
-    )
-
-    while True:
-        try:
-            print("Connecting to Quotex OTC stream...")
-            # connect() will now find Chrome installed by the build command
-            connected = await client.connect()
-            
-            if not connected:
-                print("Connection failed. Retrying in 10s...")
-                await asyncio.sleep(10)
-                continue
-
-            print("Connected successfully! Streaming OTC candles...")
-
-            while True:
-                now = int(time.time())
-                for qx_symbol, display_name in PAIRS.items():
-                    try:
-                        candles = await client.get_candles(qx_symbol, 60, 50, now)
-                        if candles and isinstance(candles, list):
-                            formatted = []
-                            for c in candles[-50:]:
-                                formatted.append({
-                                    "time": c.get("time", now),
-                                    "open": float(c.get("open", 0.0)),
-                                    "high": float(c.get("high", 0.0)),
-                                    "low": float(c.get("low", 0.0)),
-                                    "close": float(c.get("close", 0.0)),
-                                    "payout": 88
-                                })
-                            CANDLE_STORE[display_name] = formatted
-                    except Exception as e:
-                        pass
-                await asyncio.sleep(3)
-
-        except Exception as err:
-            print(f"Quotex stream error: {err}. Reconnecting in 5s...")
-            await asyncio.sleep(5)
-
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(stream_quotex_otc())
-
 @app.get("/candles")
-def get_candles():
-    return CANDLE_STORE
+async def get_candles():
+    candle_store = {
+        "EUR/USD OTC": [],
+        "GBP/USD OTC": [],
+        "USD/JPY OTC": []
+    }
+
+    if not OTCHARTS_API_KEY:
+        return {"error": "OTCHARTS_API_KEY environment variable is missing."}
+
+    headers = {
+        "Authorization": f"Bearer {OTCHARTS_API_KEY}"
+    }
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for symbol, display_name in SYMBOL_MAP.items():
+            try:
+                # Query Quotex OTC 60-second candles
+                url = f"https://api.otcharts.com/v1/candles?venue=quotex&symbol={symbol}&tf=60&limit=50"
+                response = await client.get(url, headers=headers)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    raw_bars = data.get("candles") or data.get("data") or []
+                    
+                    formatted = []
+                    for b in raw_bars:
+                        formatted.append({
+                            "time": b.get("time") or b.get("t"),
+                            "open": float(b.get("open") or b.get("o")),
+                            "high": float(b.get("high") or b.get("h")),
+                            "low": float(b.get("low") or b.get("l")),
+                            "close": float(b.get("close") or b.get("c")),
+                            "payout": 88
+                        })
+                    candle_store[display_name] = formatted
+            except Exception as e:
+                print(f"Error fetching {symbol}: {e}")
+
+    return candle_store
+
+@app.get("/")
+def health_check():
+    return {"status": "ok", "provider": "OTCharts-bridge"}
