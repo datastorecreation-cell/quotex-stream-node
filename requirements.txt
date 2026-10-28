@@ -1,4 +1,3 @@
 fastapi
 uvicorn
-quotexpy
-playwright
+websockets
